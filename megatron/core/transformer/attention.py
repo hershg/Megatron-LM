@@ -82,10 +82,14 @@ if not HAVE_FA3:
         pass
 
 try:
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _get_dist_version
+
+    _get_dist_version("flash-attn-4")
     from flash_attn.cute import flash_attn_varlen_func as flash_attn4_varlen_func
 
     HAVE_FA4 = True
-except ImportError:
+except (ImportError, PackageNotFoundError):
     HAVE_FA4 = False
 
 try:
