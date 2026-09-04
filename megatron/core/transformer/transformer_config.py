@@ -351,6 +351,11 @@ class TransformerConfig(ModelParallelConfig):
     """Whether to use sparse DSA indexer loss. If True, the indexer loss will be computed using the
     top-k indices."""
 
+    dsa_indexer_query_block_size: int = 8192
+    """Maximum query rows per fused DSA indexer launch. The TileLang backend materializes an
+    fp32 ``[query_block, key_length]`` score tensor, so smaller values reduce peak memory at the
+    cost of additional kernel launches."""
+
     dsa_kernel_backend: Literal["none", "tilelang", "cudnn"] = "none"
     """Optional fused DSA kernel backend.
     ``none`` disables fused DSA kernels. Explicit ``tilelang`` or ``cudnn`` enables only that
@@ -1662,6 +1667,11 @@ class TransformerConfig(ModelParallelConfig):
             if self.dsa_indexer_topk_freq < 1:
                 raise ValueError(
                     f"dsa_indexer_topk_freq must be positive, got {self.dsa_indexer_topk_freq}."
+                )
+            if self.dsa_indexer_query_block_size < 1:
+                raise ValueError(
+                    "dsa_indexer_query_block_size must be positive, got "
+                    f"{self.dsa_indexer_query_block_size}."
                 )
             if self.dsa_indexer_skip_topk_offset < 0:
                 raise ValueError(

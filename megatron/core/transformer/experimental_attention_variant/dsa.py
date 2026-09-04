@@ -2222,7 +2222,11 @@ class DSAttention(MegatronModule):
             # ===================================
             if sparse_indexer_loss and fused_bounds is not None:
                 starts_i32, ends_i32 = fused_bounds
-                block_size = int(getattr(self, "fused_indexer_block_size", 8192))
+                block_size = int(
+                    getattr(
+                        self, "fused_indexer_block_size", self.config.dsa_indexer_query_block_size
+                    )
+                )
                 fused_topk_with_loss = dsa_kernels.run_fused_qk_topk_with_loss(
                     self.config,
                     q,
@@ -2272,7 +2276,11 @@ class DSAttention(MegatronModule):
             # ===================================
             if fused_bounds is not None:
                 starts_i32, ends_i32 = fused_bounds
-                block_size = int(getattr(self, "fused_indexer_block_size", 8192))
+                block_size = int(
+                    getattr(
+                        self, "fused_indexer_block_size", self.config.dsa_indexer_query_block_size
+                    )
+                )
                 fused_topk = dsa_kernels.run_fused_qk_topk(
                     self.config,
                     q,
