@@ -2622,6 +2622,63 @@ class TestDSAttention:
         assert isinstance(self.sparse_attention.indexer, DSAIndexer)
         assert self.config.experimental_attention_variant_loss_scale_func is None
 
+    def test_fused_topk_uses_configured_query_block_size(self, monkeypatch):
+        """The configured query block size must reach the fused indexer backend."""
+        seq_len = 4
+        batch_size = 1
+        num_heads = self.config.num_attention_heads
+        head_dim = self.config.hidden_size // num_heads
+        expected_output = torch.randn(seq_len, batch_size, self.config.hidden_size)
+        seen = {}
+
+        def _fake_forward_before_topk(_x, _qr, _packed_seq_params):
+            return (
+                torch.randn(seq_len, batch_size, 2, 4),
+                torch.randn(seq_len, batch_size, 4),
+                torch.ones(seq_len, batch_size, 2),
+            )
+
+        def _skip_full_fused_attention(**_kwargs):
+            return None
+
+        def _fake_fused_topk(**kwargs):
+            seen["block_size"] = kwargs["block_size"]
+            return (
+                torch.zeros(batch_size, seq_len, self.config.dsa_indexer_topk, dtype=torch.int64),
+                None,
+            )
+
+        monkeypatch.setattr(self.config, "attention_backend", "auto")
+        monkeypatch.setattr(self.config, "dsa_kernel_backend", "tilelang")
+        monkeypatch.setattr(self.config, "dsa_indexer_query_block_size", 3)
+        monkeypatch.setattr(
+            self.sparse_attention.indexer, "forward_before_topk", _fake_forward_before_topk
+        )
+        monkeypatch.setattr(dsa_kernels, "run_fused_dsa_attention", _skip_full_fused_attention)
+        monkeypatch.setattr(dsa_kernels, "run_fused_qk_topk", _fake_fused_topk)
+        monkeypatch.setattr(
+            "megatron.core.transformer.experimental_attention_variant.dsa._run_sparse_attention",
+            lambda **_kwargs: expected_output,
+        )
+
+        was_training = self.sparse_attention.training
+        self.sparse_attention.eval()
+        try:
+            output = self.sparse_attention(
+                query=torch.randn(seq_len, batch_size, num_heads, head_dim),
+                key=torch.randn(seq_len, batch_size, num_heads, head_dim),
+                value=torch.randn(seq_len, batch_size, num_heads, head_dim),
+                x=torch.randn(seq_len, batch_size, self.config.hidden_size),
+                qr=torch.randn(seq_len, batch_size, self.config.q_lora_rank),
+                attention_mask=None,
+                attn_mask_type=AttnMaskType.causal,
+            )
+        finally:
+            self.sparse_attention.train(was_training)
+
+        assert output is expected_output
+        assert seen["block_size"] == 3
+
     def test_unfused_backend_skips_full_fused_attention(self, monkeypatch):
         """attention_backend=unfused must bypass optional full fused DSA kernels."""
         seq_len = 4

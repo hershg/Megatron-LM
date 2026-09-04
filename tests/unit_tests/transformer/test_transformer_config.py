@@ -135,6 +135,19 @@ def test_gdp_num_householder_rejects_non_positive_values(num_householder: int):
         )
 
 
+@pytest.mark.parametrize("query_block_size", [0, -1])
+def test_dsa_indexer_rejects_non_positive_query_block_size(query_block_size: int):
+    with pytest.raises(ValueError, match="dsa_indexer_query_block_size must be positive"):
+        TransformerConfig(
+            num_layers=1,
+            hidden_size=128,
+            num_attention_heads=4,
+            experimental_attention_variant="dsa",
+            add_bias_linear=False,
+            dsa_indexer_query_block_size=query_block_size,
+        )
+
+
 def _make_mxfp8_wire_config(**overrides) -> TransformerConfig:
     kwargs = dict(
         num_layers=1,
