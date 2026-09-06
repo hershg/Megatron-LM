@@ -395,6 +395,29 @@ def _compute_sparse_topk_kl_chunk(
     return grad_surrogate + (kl_value - grad_surrogate).detach()
 
 
+def _get_sparse_indexer_target_width(topk: int) -> int:
+    """Return the smallest compiler-supported TileLang target width."""
+    alignment = 64 if topk <= 256 else 256
+    return ((topk + alignment - 1) // alignment) * alignment
+
+
+@torch.no_grad()
+def _compute_fused_sparse_indexer_target(
+    query: torch.Tensor, key: torch.Tensor, topk_indices: torch.Tensor, softmax_scale: float
+) -> torch.Tensor:
+    """Compute a fused sparse target, padding unsupported widths with invalid indices."""
+    topk = topk_indices.size(-1)
+    kernel_topk = _get_sparse_indexer_target_width(topk)
+    if kernel_topk == topk:
+        return sparse_indexer_target_interface(query, key, topk_indices, softmax_scale)
+
+    padded_indices = torch.nn.functional.pad(
+        topk_indices, (0, kernel_topk - topk), value=-1
+    ).contiguous()
+    padded_target = sparse_indexer_target_interface(query, key, padded_indices, softmax_scale)
+    return padded_target[..., :topk]
+
+
 def _can_use_fused_sparse_indexer_target(
     query: torch.Tensor, key: Optional[torch.Tensor], topk_indices: torch.Tensor
 ) -> bool:
@@ -412,8 +435,7 @@ def _can_use_fused_sparse_indexer_target(
         and query.size(-1) == key.size(-1)
         and query.size(-1) % 16 == 0
         and topk_indices.ndim == 2
-        and topk_indices.size(-1) % 64 == 0
-        and (topk_indices.size(-1) <= 256 or topk_indices.size(-1) % 256 == 0)
+        and topk_indices.size(-1) > 0
     )
 
 
@@ -700,7 +722,7 @@ def fused_qk_topk_lighting_with_streaming_sparse_kl(
                 loss_topk_indices = idx_seq_raw.masked_fill(~valid_seq, -1).contiguous()
                 query_chunk = query[abs_start:abs_end, bi].contiguous()
                 if _can_use_fused_sparse_indexer_target(query_chunk, key_shared, loss_topk_indices):
-                    target_chunk = sparse_indexer_target_interface(
+                    target_chunk = _compute_fused_sparse_indexer_target(
                         query_chunk, key_shared, loss_topk_indices, softmax_scale
                     )
                 else:

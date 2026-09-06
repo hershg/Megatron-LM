@@ -1146,13 +1146,13 @@ def test_streaming_sparse_kl_uses_fused_target_when_supported(monkeypatch):
     assert calls[0][0].shape == (2, 2, 4)
     assert calls[0][1].shape == (4, 4)
     assert calls[0][3] == 0.5
+    assert calls[0][2].shape == (2, 64)
+    assert torch.equal(calls[0][2][:, :2], torch.tensor([[0, 1], [2, 3]], dtype=torch.int32))
+    assert torch.equal(calls[0][2][:, 2:], torch.full((2, 62), -1, dtype=torch.int32))
 
 
-@pytest.mark.parametrize(
-    ("topk", "expected"),
-    [(64, True), (256, True), (320, False), (512, True), (576, False)],
-)
-def test_fused_sparse_indexer_target_declines_unsupported_topk(monkeypatch, topk, expected):
+@pytest.mark.parametrize("topk", [64, 256, 320, 512, 576])
+def test_fused_sparse_indexer_target_accepts_padded_topk(monkeypatch, topk):
     class FakeCudaTensor:
         is_cuda = True
         dtype = torch.bfloat16
@@ -1169,7 +1169,15 @@ def test_fused_sparse_indexer_target_declines_unsupported_topk(monkeypatch, topk
     key = FakeCudaTensor((512, 256))
     topk_indices = FakeCudaTensor((2, topk))
 
-    assert tilelang_dsa._can_use_fused_sparse_indexer_target(query, key, topk_indices) is expected
+    assert tilelang_dsa._can_use_fused_sparse_indexer_target(query, key, topk_indices)
+
+
+@pytest.mark.parametrize(
+    ("topk", "expected"),
+    [(1, 64), (64, 64), (65, 128), (256, 256), (257, 512), (320, 512), (576, 768), (1240, 1280)],
+)
+def test_sparse_indexer_target_width_uses_compiler_supported_alignment(topk, expected):
+    assert tilelang_dsa._get_sparse_indexer_target_width(topk) == expected
 
 
 @pytest.mark.parametrize("heads", [48, 96])
@@ -1216,6 +1224,41 @@ def test_fused_sparse_indexer_target_and_kl_match_reference(heads):
     ).masked_fill(~valid, 0.0)
     torch.testing.assert_close(loss, reference_loss, rtol=2e-3, atol=2e-3)
     torch.testing.assert_close(logits.grad, reference_grad, rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.parametrize("topk", [320, 576, 824, 1240])
+def test_padded_fused_sparse_indexer_target_matches_reference(topk):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for TileLang indexer-loss tests")
+    if not tilelang_indexer_loss.HAVE_TILELANG:
+        pytest.skip("TileLang indexer-loss kernels are unavailable")
+
+    torch.manual_seed(1234 + topk)
+    seq_len = 2
+    key_len = 1280
+    heads = 8
+    dim = 256
+    softmax_scale = dim**-0.5
+    query = torch.randn(seq_len, heads, dim, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn(key_len, dim, device="cuda", dtype=torch.bfloat16)
+    topk_indices = torch.arange(topk, device="cuda", dtype=torch.int32).repeat(seq_len, 1)
+    topk_indices[1, -16:] = -1
+    valid = topk_indices >= 0
+
+    target = tilelang_dsa._compute_fused_sparse_indexer_target(
+        query, key, topk_indices, softmax_scale
+    )
+    safe_indices = topk_indices.clamp(min=0).to(torch.int64)
+    selected_key = key.index_select(0, safe_indices.reshape(-1)).view(seq_len, topk, dim)
+    reference_scores = (
+        torch.einsum("shd,skd->shk", query.float(), selected_key.float()) * softmax_scale
+    )
+    reference_scores = reference_scores.masked_fill(~valid.unsqueeze(1), float("-inf"))
+    reference_target = torch.softmax(reference_scores, dim=-1).masked_fill(~valid.unsqueeze(1), 0.0)
+    reference_target = reference_target.sum(dim=1)
+
+    assert target.shape == (seq_len, topk)
+    torch.testing.assert_close(target, reference_target, rtol=2e-2, atol=2e-2)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
