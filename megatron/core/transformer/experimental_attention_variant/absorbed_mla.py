@@ -894,8 +894,16 @@ class AbsorbedMLASelfAttention(Attention):
         # =====================
         # Query, Key, and Value
         # =====================
-        q_absorbed, kv_compressed, q_compressed = self.get_query_key_value_tensors(
-            hidden_states, key_value_states, packed_seq_params, inference_context=inference_context
+        qkv_linear_manager = off_interface(self.offload_qkv_linear, hidden_states, "qkv_linear")
+        with qkv_linear_manager as hidden_states:
+            q_absorbed, kv_compressed, q_compressed = self.get_query_key_value_tensors(
+                hidden_states,
+                key_value_states,
+                packed_seq_params,
+                inference_context=inference_context,
+            )
+        q_absorbed = qkv_linear_manager.group_offload(
+            q_absorbed, forced_released_tensors=[hidden_states]
         )
 
         assert q_absorbed.is_contiguous()
