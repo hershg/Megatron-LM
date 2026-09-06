@@ -902,9 +902,7 @@ class AbsorbedMLASelfAttention(Attention):
                 packed_seq_params,
                 inference_context=inference_context,
             )
-        q_absorbed = qkv_linear_manager.group_offload(
-            q_absorbed, forced_released_tensors=[hidden_states]
-        )
+        q_absorbed = qkv_linear_manager.group_offload(q_absorbed)
 
         assert q_absorbed.is_contiguous()
         assert q_compressed.is_contiguous()

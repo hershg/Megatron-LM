@@ -368,10 +368,13 @@ def test_forward_honors_fine_grained_attention_offload(monkeypatch):
         def group_offload(self, tensor, forced_released_tensors=None):
             events.append(f"offload:{self.name}")
             self.released = forced_released_tensors
+            for released_tensor in forced_released_tensors or []:
+                released_tensor.untyped_storage().resize_(0)
             return tensor
 
     def run_core_attention(*args, **kwargs):
-        del args, kwargs
+        del args
+        assert kwargs["x"].sum().item() == 8
         events.append("core_attention")
         return torch.ones(2, 1, 4)
 
@@ -424,7 +427,7 @@ def test_forward_honors_fine_grained_attention_offload(monkeypatch):
         "offload:attn_proj",
     ]
     assert [manager.enabled for manager in managers] == [True, True, True]
-    assert managers[0].released == [hidden_states]
+    assert managers[0].released is None
     assert len(managers[1].released) == 2
     assert managers[2].released == [managers[2].tensor]
 
