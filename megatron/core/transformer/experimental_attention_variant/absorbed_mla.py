@@ -63,6 +63,65 @@ else:
     TEColumnParallelLinear, TELinear, Linear, set_save_original_input = None, None, None, None
 
 
+class _ConcatenatedAbsorbedKUpProjection(torch.autograd.Function):
+    """Write the absorbed K projection and positional query into one allocation."""
+
+    @staticmethod
+    def forward(ctx, q_no_pe, q_pos_emb, k_up_weight):
+        num_heads = q_no_pe.size(-2)
+        kv_lora_rank = k_up_weight.size(-1)
+        qk_pos_emb_head_dim = q_pos_emb.size(-1)
+        output = q_no_pe.new_empty(
+            *q_no_pe.shape[:-1], kv_lora_rank + qk_pos_emb_head_dim
+        )
+
+        q_no_pe_flat = q_no_pe.reshape(-1, num_heads, q_no_pe.size(-1))
+        output_flat = output.view(-1, num_heads, output.size(-1))
+        for head in range(num_heads):
+            torch.mm(
+                q_no_pe_flat[:, head, :],
+                k_up_weight[head],
+                out=output_flat[:, head, :kv_lora_rank],
+            )
+        output_flat[..., kv_lora_rank:].copy_(
+            q_pos_emb.reshape(-1, num_heads, qk_pos_emb_head_dim)
+        )
+
+        ctx.save_for_backward(q_no_pe, k_up_weight)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        q_no_pe, k_up_weight = ctx.saved_tensors
+        num_heads = q_no_pe.size(-2)
+        kv_lora_rank = k_up_weight.size(-1)
+        q_no_pe_flat = q_no_pe.reshape(-1, num_heads, q_no_pe.size(-1))
+        grad_output_flat = grad_output.reshape(-1, num_heads, grad_output.size(-1))
+        grad_absorbed = grad_output_flat[..., :kv_lora_rank]
+
+        grad_q_no_pe = torch.empty_like(q_no_pe, memory_format=torch.contiguous_format)
+        grad_q_no_pe_flat = grad_q_no_pe.view(-1, num_heads, q_no_pe.size(-1))
+        for head in range(num_heads):
+            torch.mm(
+                grad_absorbed[:, head, :],
+                k_up_weight[head].transpose(0, 1),
+                out=grad_q_no_pe_flat[:, head, :],
+            )
+        grad_k_up_weight = torch.einsum(
+            "...nd,...nk->ndk", q_no_pe_flat, grad_absorbed
+        )
+
+        grad_q_pos_emb = grad_output[..., kv_lora_rank:]
+        return grad_q_no_pe, grad_q_pos_emb, grad_k_up_weight
+
+
+def _apply_absorbed_k_up_projection(
+    q_no_pe: torch.Tensor, q_pos_emb: torch.Tensor, k_up_weight: torch.Tensor
+) -> torch.Tensor:
+    """Return one contiguous absorbed-query allocation including positional channels."""
+    return _ConcatenatedAbsorbedKUpProjection.apply(q_no_pe, q_pos_emb, k_up_weight)
+
+
 def _restore_packed_thd_batch_dim(
     core_attn_out: torch.Tensor, hidden_states: torch.Tensor, packed_seq_params
 ) -> torch.Tensor:
@@ -571,16 +630,16 @@ class AbsorbedMLASelfAttention(Attention):
                     q, [self.config.qk_head_dim, self.config.qk_pos_emb_head_dim], dim=-1
                 )
 
-                # Absorb k_up_weight into q_no_pe
-                # q_absorbed: [num_tokens, n, kv_lora_rank]
-                q_absorbed = torch.einsum("...nd,ndk->...nk", q_no_pe, k_up_weight)
-                q_absorbed = q_absorbed.contiguous()
+                # Absorb k_up_weight and append the positional query directly into the final
+                # contiguous storage.
+                q_absorbed = _apply_absorbed_k_up_projection(
+                    q_no_pe, q_pos_emb, k_up_weight
+                )
                 assert q_absorbed.ndim == q.ndim
                 assert q_absorbed.shape[:-1] == q.shape[:-1]
-                assert q_absorbed.size(-1) == self.config.kv_lora_rank
-
-                # q_absorbed: [num_tokens, n, (kv_lora_rank + qk_pos_emb_head_dim)]
-                q_absorbed = torch.cat([q_absorbed, q_pos_emb], dim=-1)
+                assert q_absorbed.size(-1) == (
+                    self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim
+                )
                 # kv_compressed: [num_tokens, 1, (kv_lora_rank + qk_pos_emb_head_dim)]
                 kv_compressed = torch.cat([kv_compressed, k_pos_emb], dim=-1)
 
@@ -630,14 +689,6 @@ class AbsorbedMLASelfAttention(Attention):
                     q, [self.config.qk_head_dim, self.config.qk_pos_emb_head_dim], dim=-1
                 )
 
-                # Absorb k_up_weight into q_no_pe
-                # q_absorbed: [num_tokens, n, kv_lora_rank]
-                q_absorbed = torch.einsum("...nd,ndk->...nk", q_no_pe, k_up_weight)
-                q_absorbed = q_absorbed.contiguous()
-                assert q_absorbed.ndim == q.ndim
-                assert q_absorbed.shape[:-1] == q.shape[:-1]
-                assert q_absorbed.size(-1) == self.config.kv_lora_rank
-
                 # Apply RoPE to q_pos_emb: [num_tokens, n, qk_pos_emb_head_dim]
                 q_pos_emb = apply_rotary_pos_emb(
                     q_pos_emb,
@@ -661,8 +712,16 @@ class AbsorbedMLASelfAttention(Attention):
                     max_seqlen=rope_freqs_max_seqlen,
                 )
 
-                # query: [num_tokens, n, (kv_lora_rank + qk_pos_emb_head_dim)]
-                q_absorbed = torch.cat([q_absorbed, q_pos_emb], dim=-1)
+                # Absorb k_up_weight and append the rotated positional query directly into the
+                # final contiguous storage.
+                q_absorbed = _apply_absorbed_k_up_projection(
+                    q_no_pe, q_pos_emb, k_up_weight
+                )
+                assert q_absorbed.ndim == q.ndim
+                assert q_absorbed.shape[:-1] == q.shape[:-1]
+                assert q_absorbed.size(-1) == (
+                    self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim
+                )
                 # key: [num_tokens, 1, (kv_lora_rank + qk_pos_emb_head_dim)]
                 kv_compressed = torch.cat([kv_compressed, k_pos_emb], dim=-1)
 
