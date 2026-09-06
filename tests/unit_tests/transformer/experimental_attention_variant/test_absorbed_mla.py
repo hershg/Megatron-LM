@@ -395,6 +395,7 @@ def test_forward_honors_fine_grained_attention_offload(monkeypatch):
         ),
         num_attention_heads_per_partition=2,
         checkpoint_core_attention=False,
+        offload_qkv_linear=True,
         offload_core_attention=True,
         offload_attn_proj=True,
         training=True,
@@ -410,6 +411,9 @@ def test_forward_honors_fine_grained_attention_offload(monkeypatch):
     assert output.shape == hidden_states.shape
     assert bias is None
     assert events == [
+        "enter:qkv_linear",
+        "exit:qkv_linear",
+        "offload:qkv_linear",
         "enter:core_attn",
         "core_attention",
         "exit:core_attn",
@@ -419,9 +423,10 @@ def test_forward_honors_fine_grained_attention_offload(monkeypatch):
         "exit:attn_proj",
         "offload:attn_proj",
     ]
-    assert [manager.enabled for manager in managers] == [True, True]
-    assert len(managers[0].released) == 2
-    assert managers[1].released == [managers[1].tensor]
+    assert [manager.enabled for manager in managers] == [True, True, True]
+    assert managers[0].released == [hidden_states]
+    assert len(managers[1].released) == 2
+    assert managers[2].released == [managers[2].tensor]
 
 
 def test_load_from_state_dict_backwards_compatible_with_split_kv_up_projection(monkeypatch):
