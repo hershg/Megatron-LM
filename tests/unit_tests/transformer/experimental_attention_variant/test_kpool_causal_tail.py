@@ -6,6 +6,7 @@ import torch
 from megatron.core.transformer.experimental_attention_variant.dsa import (
     _kpool_fp8_input,
     fused_qk_topk_kpool,
+    fused_qk_topk_kpool_streaming,
 )
 from megatron.core.transformer.experimental_attention_variant.dsa_masking import (
     generate_varlen_mask_params_for_positions,
@@ -62,3 +63,46 @@ def test_kpool_fp8_input_matches_hadamard_matrix_reference(input_scale):
     )
     expected = (rotated / scale).to(torch.float8_e4m3fn).float() * scale
     torch.testing.assert_close(_kpool_fp8_input(x), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("query_tile_size,pool_tile_size", [(1, 1), (3, 2), (16, 64)])
+def test_streaming_kpool_matches_full_score_reference_for_packed_causality(
+    query_tile_size, pool_tile_size
+):
+    """The streaming 256K path must exactly preserve the reference selection."""
+    torch.manual_seed(789)
+    lengths = torch.tensor([7, 11], device="cuda")
+    total = int(lengths.sum())
+    cu_seqlens = torch.tensor([0, 7, 18], device="cuda")
+    starts = torch.repeat_interleave(torch.tensor([0, 7], device="cuda"), lengths)
+    ends = torch.cat(
+        (torch.arange(1, 8, device="cuda"), torch.arange(8, 19, device="cuda"))
+    )
+    q = torch.randn(total, 1, 2, 8, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(total, 1, 8, device="cuda", dtype=torch.bfloat16)
+    weights = torch.randn(total, 1, 2, device="cuda", dtype=torch.bfloat16)
+    gate_score = torch.randn(total, 1, 8, device="cuda", dtype=torch.bfloat16)
+    ape = torch.randn(4, 8, device="cuda")
+    kwargs = dict(
+        varlen_starts=starts,
+        varlen_ends=ends,
+        key_positions=torch.arange(total, device="cuda"),
+        cu_seqlens_kv=cu_seqlens,
+        use_relu=False,
+        always_select_tail=True,
+        fp8_indexer=False,
+    )
+    _, expected = fused_qk_topk_kpool(q, k, weights, 8, 4, gate_score, ape, **kwargs)
+    actual = fused_qk_topk_kpool_streaming(
+        q,
+        k,
+        weights,
+        8,
+        4,
+        gate_score,
+        ape,
+        **kwargs,
+        query_tile_size=query_tile_size,
+        pool_tile_size=pool_tile_size,
+    )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)

@@ -989,6 +989,131 @@ def fused_qk_topk_kpool(
     return index_scores, token_topk
 
 
+def fused_qk_topk_kpool_streaming(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    weights: torch.Tensor,
+    index_topk: int,
+    pool_size: int,
+    gate_score: torch.Tensor,
+    ape: torch.Tensor,
+    *,
+    varlen_starts: Optional[torch.Tensor] = None,
+    varlen_ends: Optional[torch.Tensor] = None,
+    key_positions: Optional[torch.Tensor] = None,
+    cu_seqlens_kv: Optional[torch.Tensor] = None,
+    use_relu: bool = True,
+    always_select_tail: bool = True,
+    fp8_indexer: bool = False,
+    query_tile_size: int = 1024,
+    pool_tile_size: int = 8192,
+) -> torch.Tensor:
+    """Select K-pool indices without retaining the complete score matrix.
+
+    GLM-5.3-Flash has 262144 query tokens and 65536 complete four-token
+    pools. Materializing FP32 index scores would consume 64 GiB per DSA layer.
+    This path keeps a fixed candidate set while it streams pool tiles. It is
+    mathematically identical to ``fused_qk_topk_kpool`` for discrete selection,
+    but cannot provide indexer-loss scores.
+    """
+    if query_tile_size <= 0 or pool_tile_size <= 0:
+        raise ValueError("query_tile_size and pool_tile_size must be positive")
+    if index_topk % pool_size:
+        raise ValueError(f"index_topk={index_topk} must be divisible by pool_size={pool_size}")
+
+    sk = k.size(0)
+    use_per_seg = cu_seqlens_kv is not None and cu_seqlens_kv.numel() >= 2
+    if use_per_seg:
+        k_pooled, pool_token_base = _kpool_compress_keys_per_seg(
+            k, gate_score, ape, pool_size, cu_seqlens_kv
+        )
+    else:
+        num_pools = sk // pool_size
+        k_pooled = _kpool_compress_keys(k, gate_score, ape, pool_size)
+        pool_token_base = torch.arange(num_pools, device=k.device, dtype=torch.int64) * pool_size
+
+    num_pools = k_pooled.size(0)
+    budget = index_topk // pool_size
+    if budget == 0:
+        raise ValueError("index_topk must be at least pool_size")
+    starts, ends, _ = dsa_masking.normalize_varlen_bounds(
+        mask=None,
+        varlen_starts=varlen_starts,
+        varlen_ends=varlen_ends,
+        key_positions=key_positions,
+        sk=sk,
+        device=q.device,
+    )
+    if starts is None:
+        raise ValueError("streaming K-pool selection requires causal varlen bounds")
+    if fp8_indexer:
+        k_pooled = _kpool_fp8_input(k_pooled)
+
+    sq, batch = q.shape[:2]
+    token_topk = torch.empty((batch, sq, index_topk), dtype=torch.int32, device=q.device)
+    pool_final_positions = pool_token_base + (pool_size - 1)
+    pool_score_positions = (
+        key_positions.index_select(0, pool_final_positions)
+        if key_positions is not None
+        else pool_final_positions
+    )
+    select_k = min(budget, num_pools)
+    for query_start in range(0, sq, query_tile_size):
+        query_end = min(query_start + query_tile_size, sq)
+        q_tile = q[query_start:query_end]
+        weights_tile = weights[query_start:query_end]
+        if fp8_indexer:
+            q_tile = _kpool_fp8_input(q_tile)
+        tile_rows = query_end - query_start
+        running_scores = torch.full(
+            (batch, tile_rows, budget), float("-inf"), dtype=torch.float32, device=q.device
+        )
+        running_ids = torch.full(
+            (batch, tile_rows, budget), -1, dtype=torch.int64, device=q.device
+        )
+        starts_tile = starts[query_start:query_end]
+        ends_tile = ends[query_start:query_end]
+        for pool_start in range(0, num_pools, pool_tile_size):
+            pool_end = min(pool_start + pool_tile_size, num_pools)
+            scores = torch.einsum(
+                "sbhd,tbd->sbht", q_tile.float(), k_pooled[pool_start:pool_end].float()
+            )
+            if use_relu:
+                scores = torch.relu(scores)
+            scores = (scores * weights_tile.unsqueeze(-1)).sum(dim=2).transpose(0, 1)
+            pool_positions = pool_score_positions[pool_start:pool_end]
+            valid = (pool_positions.unsqueeze(0) >= starts_tile.unsqueeze(1)) & (
+                pool_positions.unsqueeze(0) < ends_tile.unsqueeze(1)
+            )
+            scores = scores.masked_fill(~valid.unsqueeze(0), float("-inf"))
+            local_k = min(select_k, pool_end - pool_start)
+            local_scores, local_ids = scores.topk(local_k, dim=-1)
+            local_ids = local_ids + pool_start
+            merged_scores = torch.cat((running_scores, local_scores), dim=-1)
+            merged_ids = torch.cat((running_ids, local_ids), dim=-1)
+            running_scores, selected = merged_scores.topk(budget, dim=-1)
+            running_ids = torch.gather(merged_ids, dim=-1, index=selected)
+        running_ids = running_ids.masked_fill(running_scores == float("-inf"), -1)
+        pool_valid = running_ids >= 0
+        token_topk[:, query_start:query_end] = _expand_pools_to_tokens(
+            running_ids.reshape(batch * tile_rows, budget).clamp(min=0),
+            pool_valid.reshape(batch * tile_rows, budget),
+            index_topk,
+            pool_size,
+            pool_token_base=pool_token_base if use_per_seg else None,
+        ).reshape(batch, tile_rows, index_topk)
+    if always_select_tail:
+        lengths = ends - starts
+        tail_starts = ends - lengths.remainder(pool_size)
+        token_topk = _append_tail_to_topk(
+            token_topk.reshape(batch * sq, -1),
+            lengths.expand(batch, -1).reshape(-1),
+            pool_size,
+            tail_start_override=tail_starts.expand(batch, -1).reshape(-1),
+        ).reshape(batch, sq, -1)
+    return token_topk
+
+
 def fwd_fused_indexer_loss_naive(
     q,
     weights,
@@ -2660,7 +2785,7 @@ class DSAttention(MegatronModule):
             if _is_kpool:
                 # KPool selection is discrete and does not need an autograd graph.
                 with torch.no_grad():
-                    _index_scores, topk_indices = fused_qk_topk_kpool(
+                    topk_indices = fused_qk_topk_kpool_streaming(
                         q,
                         k,
                         weights,
@@ -2677,7 +2802,6 @@ class DSAttention(MegatronModule):
                         always_select_tail=self.indexer.index_kpool_always_select_tail,
                         fp8_indexer=self.config.dsa_indexer_kpool_fp8,
                     )
-                    del _index_scores
                 slice_topk_to_local_sequence_parallel_rows()
             elif fused_bounds is not None:
                 starts_i32, ends_i32 = fused_bounds
