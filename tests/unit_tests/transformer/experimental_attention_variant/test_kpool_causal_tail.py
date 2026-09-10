@@ -66,8 +66,9 @@ def test_kpool_fp8_input_matches_hadamard_matrix_reference(input_scale):
 
 
 @pytest.mark.parametrize("query_tile_size,pool_tile_size", [(1, 1), (3, 2), (16, 64)])
+@pytest.mark.parametrize("reordered_key_positions", [False, True])
 def test_streaming_kpool_matches_full_score_reference_for_packed_causality(
-    query_tile_size, pool_tile_size
+    query_tile_size, pool_tile_size, reordered_key_positions
 ):
     """The streaming 256K path must exactly preserve the reference selection."""
     torch.manual_seed(789)
@@ -83,10 +84,13 @@ def test_streaming_kpool_matches_full_score_reference_for_packed_causality(
     weights = torch.randn(total, 1, 2, device="cuda", dtype=torch.bfloat16)
     gate_score = torch.randn(total, 1, 8, device="cuda", dtype=torch.bfloat16)
     ape = torch.randn(4, 8, device="cuda")
+    key_positions = torch.arange(total, device="cuda")
+    if reordered_key_positions:
+        key_positions = key_positions.roll(4)
     kwargs = dict(
         varlen_starts=starts,
         varlen_ends=ends,
-        key_positions=torch.arange(total, device="cuda"),
+        key_positions=key_positions,
         cu_seqlens_kv=cu_seqlens,
         use_relu=False,
         always_select_tail=True,
