@@ -2498,6 +2498,11 @@ class DSAttention(MegatronModule):
         use_indexer_loss = (
             self.training and torch.is_grad_enabled() and indexer_loss_coeff > 0 and computes_topk
         )
+        if _is_kpool and indexer_loss_coeff > 0:
+            raise NotImplementedError(
+                "K-pool DSA indexer loss would materialize its full pool-score matrix; "
+                "set dsa_indexer_loss_coeff=0 for the streamed long-context path."
+            )
         if use_indexer_loss and sequence_parallel_query_is_local:
             raise RuntimeError(
                 "DSA indexer loss requires TP ranks to own the same query rows; "
