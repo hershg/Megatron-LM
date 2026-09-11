@@ -783,8 +783,8 @@ def fused_sparse_mla_absorbed(
         return None
     if query.size(-1) != key.size(-1):
         return None
-    if query.size(-1) != 576 or v_channels != 512:
-        # Current copied TileLang kernels are specialized for GLM5/DeepSeek V3.2 absorbed dims.
+    if query.size(-1) not in (512, 576) or v_channels != 512:
+        # The copied kernel consumes a 512-wide latent plus an optional 64-wide RoPE tail.
         return None
     query_heads = query.size(2)
     if query_heads <= 0:
@@ -794,6 +794,12 @@ def fused_sparse_mla_absorbed(
         return None
     if topk_indices.size(-1) % 64 != 0:
         return None
+
+    if query.size(-1) == 512:
+        # GLM-5.3-Flash is NoPE MLA. A zero RoPE tail preserves its scores exactly while
+        # adapting it to the 576-wide SparseMLA kernel; autograd discards the padded gradients.
+        query = torch.nn.functional.pad(query, (0, 64))
+        key = torch.nn.functional.pad(key, (0, 64))
 
     query_bshd = query.permute(1, 0, 2, 3).contiguous()
     if kernel_heads != query_heads:

@@ -1025,6 +1025,35 @@ def test_fused_sparse_mla_absorbed_pads_small_head_count_without_gradient_leak(m
     assert torch.count_nonzero(key.grad[..., 512:]) == 0
 
 
+def test_fused_sparse_mla_absorbed_pads_nope_tail_without_gradient_leak(monkeypatch):
+    class FakeSparseMLA:
+        @staticmethod
+        def apply(q_t, kv_t, idx_t, softmax_scale):
+            assert q_t.shape == (1, 2, 16, 576)
+            assert kv_t.shape == (1, 2, 1, 576)
+            assert idx_t.shape == (1, 2, 1, 64)
+            assert softmax_scale == 0.25
+            assert torch.count_nonzero(q_t[..., 512:]) == 0
+            assert torch.count_nonzero(kv_t[..., 512:]) == 0
+            out = q_t[..., :512] + kv_t[..., :512]
+            return out, torch.zeros(q_t.shape[:-1], dtype=torch.float32)
+
+    monkeypatch.setattr(tilelang_dsa, "SparseMLA", FakeSparseMLA)
+    query = torch.randn(2, 1, 16, 512, dtype=torch.bfloat16, requires_grad=True)
+    key = torch.randn(2, 1, 1, 512, dtype=torch.bfloat16, requires_grad=True)
+    topk_indices = torch.zeros(1, 2, 64, dtype=torch.int32)
+
+    output = tilelang_dsa.fused_sparse_mla_absorbed(
+        query, key, topk_indices, softmax_scale=0.25, v_channels=512
+    )
+
+    assert output is not None
+    assert output.shape == (2, 1, 16, 512)
+    output.float().sum().backward()
+    assert torch.equal(query.grad, torch.ones_like(query.grad))
+    assert torch.equal(key.grad, torch.full_like(key.grad, 16.0))
+
+
 def test_streaming_sparse_kl_path_with_mocked_tilelang_indexer(monkeypatch):
     q = torch.empty(2, 1, 2, 4, dtype=torch.bfloat16)
     k = torch.empty(4, 1, 4, dtype=torch.bfloat16)
