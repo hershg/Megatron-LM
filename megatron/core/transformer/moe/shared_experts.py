@@ -9,7 +9,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
-from megatron.core.activations import situ_glu, tanh_soft_clamp
+from megatron.core.activations import apply_glu_linear_offset, situ_glu, tanh_soft_clamp
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
 from megatron.core.extensions.transformer_engine import HAVE_TE
 from megatron.core.fusions.fused_bias_geglu import bias_geglu_impl
@@ -313,8 +313,8 @@ class SharedExpertMLP(MLP):
                             if (val := self.config.activation_func_clamp_value) is not None:
                                 x_glu = x_glu.clamp(min=None, max=val)
                                 x_linear = x_linear.clamp(min=-val, max=val)
-                            return self.config.activation_func(x_glu) * (
-                                x_linear + self.config.glu_linear_offset
+                            return self.config.activation_func(x_glu) * apply_glu_linear_offset(
+                                x_linear, self.config.glu_linear_offset
                             )
 
                         intermediate_parallel = glu(intermediate_parallel)

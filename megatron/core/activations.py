@@ -7,6 +7,13 @@ import torch.nn.functional as F
 from megatron.core.jit import jit_fuser
 
 
+def apply_glu_linear_offset(x: torch.Tensor, offset: float) -> torch.Tensor:
+    """Apply a nonzero GLU linear offset without copying the zero-offset input."""
+    if offset == 0.0:
+        return x
+    return x + offset
+
+
 @jit_fuser
 def squared_relu(x: torch.Tensor) -> torch.Tensor:
     """Squared ReLU activation"""
@@ -36,7 +43,7 @@ def situ_glu(
     x_gate, x_linear = torch.chunk(x, 2, dim=-1)
     if linear_scale is not None:
         x_linear = tanh_soft_clamp(x_linear, linear_scale)
-    return situ(x_gate, gate_scale) * (x_linear + linear_offset)
+    return situ(x_gate, gate_scale) * apply_glu_linear_offset(x_linear, linear_offset)
 
 
 @jit_fuser
