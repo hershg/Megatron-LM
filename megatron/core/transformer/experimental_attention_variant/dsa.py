@@ -2498,6 +2498,7 @@ class DSAttention(MegatronModule):
         use_indexer_loss = (
             self.training and torch.is_grad_enabled() and indexer_loss_coeff > 0 and computes_topk
         )
+        _is_kpool = self.indexer is not None and getattr(self.indexer, "index_kpool", 1) > 1
         if _is_kpool and indexer_loss_coeff > 0:
             raise NotImplementedError(
                 "K-pool DSA indexer loss would materialize its full pool-score matrix; "
@@ -2649,7 +2650,6 @@ class DSAttention(MegatronModule):
         # path computes its own per-token top-k and does NOT implement pool-granular
         # selection / key compression / tail-append. Bypass it so the Python kpool
         # top-k path below runs instead (mirrors DSAIndexer.forward_with_scores).
-        _is_kpool = self.indexer is not None and getattr(self.indexer, "index_kpool", 1) > 1
         if use_fused_kernels and not self.index_share and not _is_kpool:
             assert q is not None and k is not None and weights is not None
             fused_output = dsa_kernels.run_fused_dsa_attention(
