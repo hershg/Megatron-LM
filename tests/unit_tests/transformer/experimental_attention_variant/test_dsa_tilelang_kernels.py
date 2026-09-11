@@ -995,6 +995,29 @@ def test_fused_sparse_mla_absorbed_batches_mocked_tilelang_outputs(monkeypatch):
     assert torch.equal(output[:, 1], torch.full_like(output[:, 1], 18432.0))
 
 
+def test_fused_sparse_mla_absorbed_accepts_unaligned_topk_width(monkeypatch):
+    class FakeSparseMLA:
+        @staticmethod
+        def apply(q_t, kv_t, idx_t, softmax_scale):
+            assert q_t.shape == (1, 2, 16, 576)
+            assert kv_t.shape == (1, 2, 1, 576)
+            assert idx_t.shape == (1, 2, 1, 2051)
+            assert softmax_scale == 0.25
+            return q_t[..., :512], torch.zeros(q_t.shape[:-1], dtype=torch.float32)
+
+    monkeypatch.setattr(tilelang_dsa, "SparseMLA", FakeSparseMLA)
+    query = torch.zeros(2, 1, 16, 512, dtype=torch.bfloat16)
+    key = torch.zeros(2, 1, 1, 512, dtype=torch.bfloat16)
+    topk_indices = torch.zeros(1, 2, 2051, dtype=torch.int32)
+
+    output = tilelang_dsa.fused_sparse_mla_absorbed(
+        query, key, topk_indices, softmax_scale=0.25, v_channels=512
+    )
+
+    assert output is not None
+    assert output.shape == (2, 1, 16, 512)
+
+
 def test_fused_sparse_mla_absorbed_pads_small_head_count_without_gradient_leak(monkeypatch):
     class FakeSparseMLA:
         @staticmethod

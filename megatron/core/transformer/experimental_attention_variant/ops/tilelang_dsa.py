@@ -792,9 +792,6 @@ def fused_sparse_mla_absorbed(
     kernel_heads = max(query_heads, 16)
     if not _is_supported_sparse_mla_head_count(kernel_heads, kv_group=key.size(2)):
         return None
-    if topk_indices.size(-1) % 64 != 0:
-        return None
-
     if query.size(-1) == 512:
         # GLM-5.3-Flash is NoPE MLA. A zero RoPE tail preserves its scores exactly while
         # adapting it to the 576-wide SparseMLA kernel; autograd discards the padded gradients.
@@ -808,6 +805,8 @@ def fused_sparse_mla_absorbed(
         query_bshd = torch.nn.functional.pad(query_bshd, (0, 0, 0, kernel_heads - query_heads))
     key_bshd = key.permute(1, 0, 2, 3).contiguous()
     indices_bsgk = topk_indices.unsqueeze(2).to(torch.int32).contiguous()
+    # SparseMLA buckets unaligned top-k widths and pads the added entries with
+    # its established -1 invalid-index sentinel.
     out, _ = SparseMLA.apply(query_bshd, key_bshd, indices_bsgk, softmax_scale)
     if out.ndim != 4 or out.size(2) != kernel_heads or out.size(-1) != v_channels:
         return None
