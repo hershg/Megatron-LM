@@ -2798,7 +2798,6 @@ class DSAttention(MegatronModule):
                         self.indexer.index_kpool,
                         self.indexer._kpool_gate_score,
                         self.indexer.index_kpool_compress_ape,
-                        mask=float_mask,
                         varlen_starts=varlen_starts,
                         varlen_ends=varlen_ends,
                         key_positions=key_positions,
