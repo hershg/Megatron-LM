@@ -629,7 +629,7 @@ class TransformerConfig(ModelParallelConfig):
     recompute_modules: Optional[List[str]] = None
     """The submodules to recompute.
     choices: "core_attn", "moe_act", "layernorm", "mla_up_proj", "mlp", "moe",
-    "shared_experts", "gdn_norm_out", "gdp_in_proj", "gdp_qkv", "mhc".
+    "shared_experts", "gdn", "gdn_norm_out", "gdp_in_proj", "gdp_qkv", "mhc".
     default: ["core_attn"].
     "core_attn": recompute the core attention part of the transformer layer.
     "moe_act": recompute the MoE MLP activation function.
@@ -638,6 +638,7 @@ class TransformerConfig(ModelParallelConfig):
     "mlp": recompute the dense MLP submodule.
     "moe": recompute the MoE layer.
     "shared_experts": recompute the shared experts in the MoE layer.
+    "gdn": recompute the complete gated delta net layer.
     "gdn_norm_out": recompute the GatedDeltaNet output norm and HP-to-CP all-to-all.
     "gdp_in_proj": recompute the GatedDeltaProduct input projection and its CP gather/split
     preprocessing.
@@ -2193,6 +2194,7 @@ class TransformerConfig(ModelParallelConfig):
                     "mlp",
                     "moe",
                     "shared_experts",
+                    "gdn",
                     "gdn_norm_out",
                     "gdp_in_proj",
                     "gdp_qkv",

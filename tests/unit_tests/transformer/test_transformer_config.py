@@ -84,6 +84,18 @@ def test_explicit_mhc_fused_backend_requires_fused_mhc():
         )
 
 
+def test_selective_recompute_accepts_complete_gdn_module():
+    config = TransformerConfig(
+        num_layers=1,
+        hidden_size=128,
+        num_attention_heads=4,
+        recompute_granularity="selective",
+        recompute_modules=["gdn"],
+    )
+
+    assert config.recompute_modules == ["gdn"]
+
+
 def test_gdp_num_householder_defaults_to_three():
     config = TransformerConfig(num_layers=1, hidden_size=128, num_attention_heads=4)
 
