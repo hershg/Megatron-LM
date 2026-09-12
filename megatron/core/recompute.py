@@ -11,6 +11,10 @@ from megatron.core.fp4_utils import get_fp4_context
 from megatron.core.fp8_utils import get_fp8_context
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.ssm.mamba_layer_config import MambaLayerConfig
+from megatron.core.transformer.hyper_connection import (
+    build_mhc_recompute_layer_plan,
+    finalize_mhc_recompute_layer,
+)
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_layer import TransformerLayer
 
@@ -77,6 +81,14 @@ def checkpointed_forward(
                 else rotary_pos_emb_global
             )
 
+            use_mhc_recompute = (
+                self.config.enable_mhc_connections
+                and "mhc" in (self.config.recompute_modules or [])
+            )
+            mhc_managers, mhc_block_ends = build_mhc_recompute_layer_plan(
+                end - start, self.config.mhc_recompute_layer_num, use_mhc_recompute
+            )
+
             for index in range(start, end):
                 # Use self.layers[index] (not self._get_layer) so this
                 # function works for both TransformerBlock and HybridStack.
@@ -117,6 +129,11 @@ def checkpointed_forward(
                     packed_seq_params=layer_packed_seq_params,
                     padding_mask=padding_mask,
                 )
+                mhc_index = index - start
+                mhc_manager = mhc_managers[mhc_index]
+                mhc_block_end = mhc_block_ends[mhc_index]
+                if mhc_manager is not None:
+                    mhc_manager.is_last_layer_in_recompute_block = mhc_block_end
                 with inner_quantization_context:
                     if isinstance(layer, TransformerLayer):
                         hidden_states, context = layer(**layer_kwargs)
@@ -131,6 +148,8 @@ def checkpointed_forward(
                             layer_kwargs["packed_sequence_cp_metadata"] = (
                                 packed_sequence_cp_metadata
                             )
+                        if mhc_manager is not None:
+                            layer_kwargs["mhc_recompute_manager"] = mhc_manager
                         hidden_states, context = layer(**layer_kwargs)
                     else:  # MambaLayer (HybridStack `M` slot)
                         for k in ("context", "context_mask", "attention_bias", "padding_mask"):
@@ -151,6 +170,7 @@ def checkpointed_forward(
                     hidden_states = hidden_states[0]
                 if cp_layout_state is not None:
                     hidden_states = cp_layout_state.finalize_layer(index, hidden_states)
+                finalize_mhc_recompute_layer(mhc_manager, hidden_states, mhc_block_end)
             return hidden_states, context
 
         return custom_forward

@@ -232,6 +232,32 @@ class TestHybridStackMHC:
         for name in ("hc_head_fn", "hc_head_base", "hc_head_scale"):
             assert getattr(stack, name).grad is not None
 
+    def test_full_recompute_passes_mhc_manager(self, monkeypatch):
+        managers = []
+        original_forward = HyperConnectionHybridLayer.forward
+
+        def tracked_forward(layer, *args, **kwargs):
+            managers.append(kwargs.get("mhc_recompute_manager"))
+            return original_forward(layer, *args, **kwargs)
+
+        monkeypatch.setattr(HyperConnectionHybridLayer, "forward", tracked_forward)
+        config = _get_config(
+            num_layers=2,
+            recompute_granularity="full",
+            recompute_method="uniform",
+            recompute_num_layers=2,
+            recompute_modules=["mhc"],
+        )
+        stack = _get_stack(config, num_local_layers=2).cuda()
+        hidden_states = torch.randn(
+            8, 2, config.hidden_size, device="cuda", requires_grad=True
+        )
+
+        stack(hidden_states, attention_mask=None).float().sum().backward()
+
+        assert len(managers) == 4
+        assert all(manager is not None for manager in managers)
+
     @pytest.mark.parametrize("recompute_method", ["uniform", "block"])
     @pytest.mark.parametrize("precision", ["fp32", "bf16_fp32_mixing", "bf16_fused"])
     def test_full_recompute_matches_forward_backward(self, recompute_method, precision):
