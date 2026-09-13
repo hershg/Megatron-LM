@@ -29,6 +29,9 @@ from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import get_pg_size
 
+
+_FUSED_ABSORBED_QUERY_CHUNK_SIZE = 8192
+
 try:
     from fast_hadamard_transform import hadamard_transform
 except ImportError:
@@ -147,6 +150,41 @@ def _run_sparse_attention(
             )
         output = None
         if dsa_kernels.use_fused_dsa_kernels(config):
+            if (
+                not torch.is_grad_enabled()
+                and query.size(0) > _FUSED_ABSORBED_QUERY_CHUNK_SIZE
+            ):
+                output = torch.empty(
+                    (query.size(0), query.size(1), query.size(2), up_v_weight.size(1)),
+                    dtype=query.dtype,
+                    device=query.device,
+                )
+                for row_start in range(0, query.size(0), _FUSED_ABSORBED_QUERY_CHUNK_SIZE):
+                    row_end = min(
+                        row_start + _FUSED_ABSORBED_QUERY_CHUNK_SIZE, query.size(0)
+                    )
+                    chunk_topk_length = (
+                        topk_length[:, row_start:row_end].contiguous()
+                        if topk_length is not None
+                        else None
+                    )
+                    chunk = dsa_kernels.run_fused_absorbed_sparse_attention(
+                        config,
+                        query[row_start:row_end],
+                        key,
+                        topk_indices[:, row_start:row_end].contiguous(),
+                        softmax_scale,
+                        latent_v_channels,
+                        topk_length=chunk_topk_length,
+                    )
+                    if chunk is None:
+                        output = None
+                        break
+                    output[row_start:row_end].copy_(
+                        torch.einsum("sbhc,hdc->sbhd", chunk, up_v_weight)
+                    )
+                if output is not None:
+                    return output.view(output.size(0), output.size(1), -1)
             output = dsa_kernels.run_fused_absorbed_sparse_attention(
                 config,
                 query,
