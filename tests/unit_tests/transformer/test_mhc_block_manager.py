@@ -427,7 +427,9 @@ class TestTransformerBlockMHCRecompute:
         Utils.destroy_model_parallel()
 
     @staticmethod
-    def _make_mhc_block(num_layers, num_streams=4, mhc_recompute_layer_num=None):
+    def _make_mhc_block(
+        num_layers, num_streams=4, mhc_recompute_layer_num=None, recompute_granularity='selective'
+    ):
         from megatron.core.models.gpt.gpt_layer_specs import (
             get_gpt_layer_with_transformer_engine_spec,
         )
@@ -435,6 +437,13 @@ class TestTransformerBlockMHCRecompute:
         from megatron.core.transformer.transformer_block import TransformerBlock
         from megatron.core.transformer.transformer_config import TransformerConfig
         from megatron.core.transformer.transformer_layer import HyperConnectionTransformerLayer
+
+        recompute_kwargs = {
+            'recompute_granularity': recompute_granularity,
+            'recompute_modules': ['mhc'],
+        }
+        if recompute_granularity == 'full':
+            recompute_kwargs.update(recompute_method='uniform', recompute_num_layers=2)
 
         config = TransformerConfig(
             num_layers=num_layers,
@@ -446,10 +455,9 @@ class TestTransformerBlockMHCRecompute:
             mhc_sinkhorn_iterations=5,
             mhc_init_gating_factor=0.01,
             mhc_recompute_layer_num=mhc_recompute_layer_num,
-            recompute_granularity='selective',
-            recompute_modules=['mhc'],
             hidden_dropout=0.0,
             attention_dropout=0.0,
+            **recompute_kwargs,
         )
         spec = get_gpt_layer_with_transformer_engine_spec()
         spec.module = HyperConnectionTransformerLayer
@@ -504,6 +512,28 @@ class TestTransformerBlockMHCRecompute:
         """TransformerBlock records static mHC recompute enablement during initialization."""
         block, _ = self._make_mhc_block(num_layers=2)
         assert block.mhc_recompute_enabled
+
+    def test_full_recompute_passes_manager_to_mhc_transformer_layer(self, monkeypatch):
+        """Full recompute must activate nested mHC output-discarding checkpoints."""
+        from megatron.core.transformer.transformer_layer import HyperConnectionTransformerLayer
+
+        managers = []
+        original_call = HyperConnectionTransformerLayer.__call__
+
+        def tracked_call(layer, *args, **kwargs):
+            managers.append(kwargs.get("mhc_recompute_manager"))
+            return original_call(layer, *args, **kwargs)
+
+        monkeypatch.setattr(HyperConnectionTransformerLayer, "__call__", tracked_call)
+        block, config = self._make_mhc_block(num_layers=2, recompute_granularity="full")
+        block.train()
+        hidden_states = torch.randn(8, 2, config.hidden_size, device="cuda", requires_grad=True)
+        attention_mask = torch.ones((1, 1, 8, 8), dtype=torch.bool, device="cuda")
+
+        block(hidden_states=hidden_states, attention_mask=attention_mask).sum().backward()
+
+        assert len(managers) == 4
+        assert all(manager is not None for manager in managers)
 
     def test_plain_transformer_layer_still_fails_fast_in_transformer_block(self):
         """The Hybrid ownership exception must not weaken ordinary TransformerBlock wiring."""

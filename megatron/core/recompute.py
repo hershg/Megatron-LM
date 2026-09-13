@@ -81,9 +81,8 @@ def checkpointed_forward(
                 else rotary_pos_emb_global
             )
 
-            use_mhc_recompute = (
-                self.config.enable_mhc_connections
-                and "mhc" in (self.config.recompute_modules or [])
+            use_mhc_recompute = self.config.enable_mhc_connections and "mhc" in (
+                self.config.recompute_modules or []
             )
             mhc_managers, mhc_block_ends = build_mhc_recompute_layer_plan(
                 end - start, self.config.mhc_recompute_layer_num, use_mhc_recompute
@@ -134,6 +133,8 @@ def checkpointed_forward(
                 mhc_block_end = mhc_block_ends[mhc_index]
                 if mhc_manager is not None:
                     mhc_manager.is_last_layer_in_recompute_block = mhc_block_end
+                    if getattr(layer, "supports_mhc_connections", False):
+                        layer_kwargs["mhc_recompute_manager"] = mhc_manager
                 with inner_quantization_context:
                     if isinstance(layer, TransformerLayer):
                         hidden_states, context = layer(**layer_kwargs)
