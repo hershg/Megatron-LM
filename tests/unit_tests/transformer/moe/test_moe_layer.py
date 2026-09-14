@@ -3,6 +3,7 @@
 import pytest
 import torch
 
+from megatron.core import tensor_parallel
 from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_decoder_block_spec,
     get_gpt_layer_local_submodules,
@@ -290,6 +291,59 @@ class TestMoELayerRecompute:
 
     def setup_method(self, method):
         pass
+
+    def test_full_moe_recompute_nests_under_outer_checkpoint(self):
+        Utils.initialize_model_parallel(1, 1)
+        _set_random_seed(seed_=123, data_parallel_random_init=False)
+
+        config_kwargs = {
+            "num_layers": 1,
+            "hidden_size": 64,
+            "num_attention_heads": 4,
+            "num_moe_experts": 2,
+            "moe_token_dispatcher_type": "alltoall",
+            "moe_router_load_balancing_type": "none",
+            "moe_router_topk": 2,
+            "moe_grouped_gemm": False,
+            "moe_ffn_hidden_size": 256,
+            "add_bias_linear": False,
+            "recompute_granularity": "full",
+            "recompute_method": "uniform",
+            "recompute_num_layers": 1,
+            "bf16": True,
+            "params_dtype": torch.bfloat16,
+        }
+        reference_config = TransformerConfig(recompute_modules=[], **config_kwargs)
+        nested_config = TransformerConfig(recompute_modules=["moe"], **config_kwargs)
+        submodules = get_submodules(
+            get_gpt_layer_local_submodules(num_experts=2, moe_grouped_gemm=False).mlp
+        )
+        reference_layer = MoELayer(reference_config, submodules).cuda()
+        nested_layer = MoELayer(nested_config, submodules).cuda()
+        nested_layer.load_state_dict(reference_layer.state_dict())
+
+        reference_input = torch.randn(
+            32, 2, 64, device=torch.cuda.current_device(), dtype=torch.bfloat16, requires_grad=True
+        )
+        nested_input = reference_input.detach().clone().requires_grad_(True)
+
+        def checkpoint_layer(layer, hidden_states):
+            return tensor_parallel.checkpoint(lambda states: layer(states)[0], False, hidden_states)
+
+        reference_output = checkpoint_layer(reference_layer, reference_input)
+        nested_output = checkpoint_layer(nested_layer, nested_input)
+        reference_output.sum().backward()
+        nested_output.sum().backward()
+
+        assert reference_layer.moe_layer_recompute is False
+        assert nested_layer.moe_layer_recompute is True
+        torch.testing.assert_close(nested_output, reference_output)
+        torch.testing.assert_close(nested_input.grad, reference_input.grad)
+        for (reference_name, reference_param), (nested_name, nested_param) in zip(
+            reference_layer.named_parameters(), nested_layer.named_parameters()
+        ):
+            assert nested_name == reference_name
+            torch.testing.assert_close(nested_param.grad, reference_param.grad)
 
     @pytest.mark.parametrize("moe_token_dispatcher_type", ["allgather", "alltoall"])
     @pytest.mark.parametrize("num_moe_experts", [2, 4])
