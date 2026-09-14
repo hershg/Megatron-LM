@@ -246,7 +246,7 @@ class MoELayer(BaseMoELayer):
         )
         # If using mcore cudagraphs, recompute is handled by transformer_layer.MoETransformerLayer
         self.moe_layer_recompute = (
-            config.recompute_granularity == 'selective'
+            config.recompute_granularity in ('full', 'selective')
             and "moe" in config.recompute_modules
             and config.cuda_graph_impl != 'local'
         )

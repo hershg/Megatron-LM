@@ -605,7 +605,8 @@ class TransformerConfig(ModelParallelConfig):
     "layernorm": recompute the input_layernorm and pre_mlp_layernorm.
     "mla_up_proj": recompute the MLA up projection and RoPE applying parts.
     "mlp": recompute the dense MLP submodule.
-    "moe": recompute the MoE layer.
+    "moe": recompute the MoE layer. This is also honored with full recompute to bound
+    per-chunk MoE activations during the outer layer recomputation.
     "shared_experts": recompute the shared experts in the MoE layer.
     "gdn_norm_out": recompute the GatedDeltaNet output norm and HP-to-CP all-to-all.
     "gdp_in_proj": recompute the GatedDeltaProduct input projection and its CP gather/split
