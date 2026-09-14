@@ -1,6 +1,7 @@
 # Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import pytest
+import torch
 
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_te_min_version
@@ -82,6 +83,19 @@ def test_explicit_mhc_fused_backend_requires_fused_mhc():
             enable_mhc_connections=True,
             mhc_fused_backend="native",
         )
+
+
+def test_mhc_accepts_pipeline_parallelism():
+    config = TransformerConfig(
+        num_layers=4,
+        hidden_size=128,
+        num_attention_heads=4,
+        enable_mhc_connections=True,
+        pipeline_dtype=torch.bfloat16,
+        pipeline_model_parallel_size=4,
+    )
+
+    assert config.pipeline_model_parallel_size == 4
 
 
 def test_selective_recompute_accepts_complete_gdn_module():

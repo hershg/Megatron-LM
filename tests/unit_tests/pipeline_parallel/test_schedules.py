@@ -102,6 +102,33 @@ def test_get_forward_backward_func():
     Utils.destroy_model_parallel()
 
 
+@pytest.mark.parametrize(
+    "enable_mhc_connections, expected_hidden_size", [(False, 128), (True, 512)]
+)
+def test_get_tensor_shapes_accounts_for_mhc_residual_streams(
+    enable_mhc_connections, expected_hidden_size
+):
+    config = SimpleNamespace(
+        enable_mhc_connections=enable_mhc_connections,
+        hidden_size=128,
+        mhc_num_residual_streams=4,
+        sequence_parallel=True,
+        variable_seq_lengths=False,
+    )
+    group = SimpleNamespace(size=lambda: 2)
+
+    shapes = schedule.get_tensor_shapes(
+        seq_length=1024,
+        micro_batch_size=1,
+        decoder_seq_length=None,
+        config=config,
+        tp_group=group,
+        cp_group=group,
+    )
+
+    assert shapes == [(256, 1, expected_hidden_size)]
+
+
 def test_deallocate_output_tensor():
     out = torch.tensor([[1, 2, 3], [4, 5, 6]])
     schedule.deallocate_output_tensor(out)
