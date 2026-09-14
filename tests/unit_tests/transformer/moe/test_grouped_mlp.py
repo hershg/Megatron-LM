@@ -44,6 +44,49 @@ def test_op_fuser_transformer_config_args_are_exposed():
     assert args.moe_use_grouped_tensor is True
 
 
+@pytest.mark.parametrize(
+    ("recompute_granularity", "recompute_modules", "expected"),
+    [
+        ("selective", ["moe_act"], True),
+        ("full", ["moe_act"], True),
+        ("full", [], False),
+        (None, ["moe_act"], False),
+    ],
+)
+def test_grouped_mlp_recomputes_explicit_moe_activation(
+    recompute_granularity, recompute_modules, expected
+):
+    recompute_kwargs = {}
+    if recompute_granularity == "full":
+        recompute_kwargs = {"recompute_method": "uniform", "recompute_num_layers": 1}
+
+    config = TransformerConfig(
+        num_layers=1,
+        hidden_size=16,
+        num_attention_heads=4,
+        num_moe_experts=2,
+        moe_ffn_hidden_size=32,
+        moe_grouped_gemm=True,
+        recompute_granularity=recompute_granularity,
+        recompute_modules=recompute_modules,
+        **recompute_kwargs,
+    )
+
+    def build_linear(*args, **kwargs):
+        return torch.nn.Identity()
+
+    module = TEGroupedMLP(
+        num_local_experts=2,
+        config=config,
+        submodules=experts_module.GroupedMLPSubmodules(
+            linear_fc1=build_linear, linear_fc2=build_linear
+        ),
+        pg_collection=SimpleNamespace(ep=None, expt_tp=None),
+    )
+
+    assert module.activation_recompute is expected
+
+
 def test_op_fuser_enables_grouped_tensor():
     config = TransformerConfig(
         num_layers=1,

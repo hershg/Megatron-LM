@@ -272,8 +272,9 @@ class TEGroupedMLP(MegatronModule):
             and "fused_group_mlp" in self.config.offload_modules
         )
 
+        # Bound peak memory inside an outer full-layer checkpoint as well as in selective mode.
         self.activation_recompute = (
-            self.config.recompute_granularity == 'selective'
+            self.config.recompute_granularity in ('full', 'selective')
             and "moe_act" in self.config.recompute_modules
         )
         if self.activation_recompute and (self.config.fp8 or self.config.fp4):

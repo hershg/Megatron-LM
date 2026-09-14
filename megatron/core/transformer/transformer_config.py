@@ -632,7 +632,8 @@ class TransformerConfig(ModelParallelConfig):
     "shared_experts", "gdn", "gdn_norm_out", "gdp_in_proj", "gdp_qkv", "mhc".
     default: ["core_attn"].
     "core_attn": recompute the core attention part of the transformer layer.
-    "moe_act": recompute the MoE MLP activation function.
+    "moe_act": recompute the MoE MLP activation function. This is also honored with full
+    recompute to bound peak memory within each MoE layer.
     "layernorm": recompute the input_layernorm and pre_mlp_layernorm.
     "mla_up_proj": recompute the MLA up projection and RoPE applying parts.
     "mlp": recompute the dense MLP submodule.
