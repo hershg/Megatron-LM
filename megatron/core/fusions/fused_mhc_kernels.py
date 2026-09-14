@@ -2734,6 +2734,7 @@ def _torch_proj_rms_compute_h(
     n: int,
     eps: float,
     compute_h_eps: float = 1e-6,
+    eps_inside_sqrt: bool = False,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     # compute_mappings() hands us activations in the activation dtype while the
     # mapping parameters are keep_in_fp32, so matmul would reject the pair.
@@ -2741,12 +2742,17 @@ def _torch_proj_rms_compute_h(
     # without letting a lower-precision parameter downcast the activations.
     x = x.to(torch.promote_types(x.dtype, weight.dtype))
     proj = torch.matmul(x, weight.t())
-    r = x.norm(dim=-1, keepdim=True) / math.sqrt(x.shape[-1])
+    if eps_inside_sqrt:
+        r = torch.rsqrt(x.square().mean(dim=-1, keepdim=True) + eps)
+        scale = r
+    else:
+        r = x.norm(dim=-1, keepdim=True) / math.sqrt(x.shape[-1])
+        scale = 1.0 / (r + eps)
     alpha = torch.cat(
         [alpha_pre.expand(n), alpha_post.expand(n), alpha_res.expand(weight.shape[0] - 2 * n)],
         dim=-1,
     )
-    h = proj * alpha.unsqueeze(0) / (r + eps) + bias.unsqueeze(0)
+    h = proj * alpha.unsqueeze(0) * scale + bias.unsqueeze(0)
     h_pre = h[..., :n].sigmoid() + compute_h_eps
     h_post = h[..., n : 2 * n].sigmoid() * 2
     h_res = h[..., 2 * n :]
@@ -2995,11 +3001,29 @@ def fused_proj_rms_compute_h(
     n: int,
     eps: float = 1e-6,
     compute_h_eps: float = 1e-6,
+    eps_inside_sqrt: bool = False,
     *,
     backend: MHCBackend = "auto",
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     """Compute projection, RMS norm, and H outputs using the backend policy."""
     _validate_mhc_backend(backend)
+    if eps_inside_sqrt:
+        if backend == "cutile":
+            raise ValueError(
+                "The cuTile fused mHC projection does not support epsilon inside sqrt."
+            )
+        return _torch_proj_rms_compute_h(
+            x,
+            weight,
+            alpha_pre,
+            alpha_post,
+            alpha_res,
+            bias,
+            n,
+            eps,
+            compute_h_eps,
+            eps_inside_sqrt=True,
+        )
     if _backend_uses_cutile(backend):
         return CutileProjRmsComputeH.apply(
             x, weight, alpha_pre, alpha_post, alpha_res, bias, n, eps, compute_h_eps

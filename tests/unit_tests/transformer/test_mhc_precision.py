@@ -81,3 +81,64 @@ def test_mhc_fused_rejects_unsupported_precision():
     )
     with pytest.raises(ValueError, match="Fused mHC does not support"):
         HyperConnectionModule(config, layer_number=1)
+
+
+def test_mhc_fused_supports_epsilon_inside_sqrt():
+    config = TransformerConfig(
+        num_layers=1,
+        hidden_size=32,
+        num_attention_heads=4,
+        enable_mhc_connections=True,
+        use_fused_mhc=True,
+        mhc_norm_eps_inside_sqrt=True,
+        mhc_fused_backend="native",
+    )
+
+    layer = HyperConnectionModule(config, layer_number=1)
+
+    assert layer._proj_rms_compute_h_op.keywords == {
+        "eps_inside_sqrt": True,
+        "backend": "native",
+    }
+
+
+def test_mhc_fused_epsilon_inside_sqrt_matches_reference():
+    from megatron.core.fusions.fused_mhc_kernels import fused_proj_rms_compute_h
+
+    torch.manual_seed(42)
+    n, eps = 4, 1e-5
+    output_size = n * n + 2 * n
+    values = [
+        torch.randn(8, 32) * 1e-3,
+        torch.randn(output_size, 32),
+        torch.randn(1),
+        torch.randn(1),
+        torch.randn(1),
+        torch.randn(output_size),
+    ]
+    actual_inputs = [value.clone().requires_grad_(True) for value in values]
+    expected_inputs = [value.clone().requires_grad_(True) for value in values]
+
+    actual = fused_proj_rms_compute_h(
+        *actual_inputs, n, eps, eps_inside_sqrt=True, backend="native"
+    )
+    x, weight, alpha_pre, alpha_post, alpha_res, bias = expected_inputs
+    projection = x @ weight.T
+    scale = torch.rsqrt(x.square().mean(dim=-1, keepdim=True) + eps)
+    alpha = torch.cat(
+        [alpha_pre.expand(n), alpha_post.expand(n), alpha_res.expand(n * n)]
+    )
+    logits = projection * alpha * scale + bias
+    expected = (
+        logits[..., :n].sigmoid() + 1e-6,
+        logits[..., n : 2 * n].sigmoid() * 2,
+        logits[..., 2 * n :],
+        scale,
+    )
+    sum(output.square().mean() for output in actual).backward()
+    sum(output.square().mean() for output in expected).backward()
+
+    for actual_output, expected_output in zip(actual, expected, strict=True):
+        torch.testing.assert_close(actual_output, expected_output)
+    for actual_input, expected_input in zip(actual_inputs, expected_inputs, strict=True):
+        torch.testing.assert_close(actual_input.grad, expected_input.grad)
