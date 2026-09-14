@@ -385,7 +385,11 @@ if _TRITON_AVAILABLE:
         """out[s, c] = sum_i x[s, i, c] * h[s, i]."""
         pid_s = tl.program_id(0)
         pid_c = tl.program_id(1)
-        offs_s = pid_s * BLOCK_S + tl.arange(0, BLOCK_S)
+        # A 256K sequence-parallel mHC tensor can exceed INT32_MAX elements
+        # even though its sequence dimension fits in int32. Promote the row
+        # index before multiplying by the hidden-state stride so pointer
+        # arithmetic remains valid for those tensors.
+        offs_s = (pid_s * BLOCK_S + tl.arange(0, BLOCK_S)).to(tl.int64)
         offs_c = pid_c * BLOCK_C + tl.arange(0, BLOCK_C)
         mask_s = offs_s < sb
         mask_c = offs_c < C
@@ -459,7 +463,7 @@ if _TRITON_AVAILABLE:
         """out = hr.T @ orig + hp * (x + bias)."""
         pid_s = tl.program_id(0)
         pid_c = tl.program_id(1)
-        offs_s = pid_s * BLOCK_S + tl.arange(0, BLOCK_S)
+        offs_s = (pid_s * BLOCK_S + tl.arange(0, BLOCK_S)).to(tl.int64)
         offs_c = pid_c * BLOCK_C + tl.arange(0, BLOCK_C)
         mask_s = offs_s < sb
         mask_c = offs_c < C
@@ -568,7 +572,7 @@ if _TRITON_AVAILABLE:
         """g_x = hp @ go, g_orig = hr @ go."""
         pid_s = tl.program_id(0)
         pid_c = tl.program_id(1)
-        offs_s = pid_s * BLOCK_S + tl.arange(0, BLOCK_S)
+        offs_s = (pid_s * BLOCK_S + tl.arange(0, BLOCK_S)).to(tl.int64)
         offs_c = pid_c * BLOCK_C + tl.arange(0, BLOCK_C)
         mask_s = offs_s < sb
         mask_c = offs_c < C
@@ -644,7 +648,7 @@ if _TRITON_AVAILABLE:
     ):
         """g_hp = sum_c go*(x+bias), g_hr = orig @ go.T."""
         pid_s = tl.program_id(0)
-        offs_s = pid_s * BLOCK_S + tl.arange(0, BLOCK_S)
+        offs_s = (pid_s * BLOCK_S + tl.arange(0, BLOCK_S)).to(tl.int64)
         mask_s = offs_s < sb
 
         g_hp_acc = tl.zeros((BLOCK_S, N), dtype=tl.float32)
