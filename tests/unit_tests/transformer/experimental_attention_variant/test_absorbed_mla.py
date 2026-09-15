@@ -19,6 +19,7 @@ from megatron.core.transformer.experimental_attention_variant import (
 from megatron.core.transformer.experimental_attention_variant.absorbed_mla import (
     AbsorbedMLASelfAttention,
     AbsorbedMLASelfAttentionSubmodules,
+    _apply_chunked_sequence_parallel_output_projection,
 )
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.multi_latent_attention import (
@@ -229,6 +230,42 @@ def get_mla_submodules(
         q_layernorm=qk_norm,
         kv_layernorm=qk_norm,
     )
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_chunked_output_projection_preserves_sequence_parallel_gradients(monkeypatch, tp_rank):
+    """Chunking must preserve each TP rank's output order and projection gradients."""
+
+    class FakeRowParallelLinear(torch.nn.Module):
+        def __init__(self, weight):
+            super().__init__()
+            self.weight = torch.nn.Parameter(weight)
+
+        def forward(self, inputs):
+            output = inputs @ self.weight.T
+            return output.chunk(2, dim=0)[tp_rank], None
+
+    monkeypatch.setattr(absorbed_mla_module, "get_pg_size", lambda group: 2)
+    torch.manual_seed(1234)
+    inputs = torch.randn(10, 1, 4, dtype=torch.float64, requires_grad=True)
+    weight = torch.randn(3, 4, dtype=torch.float64)
+    reference_inputs = inputs.detach().clone().requires_grad_()
+    reference_weight = weight.detach().clone().requires_grad_()
+    output_grad = torch.randn(5, 1, 3, dtype=torch.float64)
+
+    projection = FakeRowParallelLinear(weight.detach().clone())
+    output, bias = _apply_chunked_sequence_parallel_output_projection(
+        projection, inputs, local_chunk_size=2, tp_group=object()
+    )
+    output.backward(output_grad)
+
+    reference_output = (reference_inputs @ reference_weight.T).chunk(2, dim=0)[tp_rank]
+    reference_output.backward(output_grad)
+
+    assert bias is None
+    torch.testing.assert_close(output, reference_output)
+    torch.testing.assert_close(inputs.grad, reference_inputs.grad)
+    torch.testing.assert_close(projection.weight.grad, reference_weight.grad)
 
 
 def test_checkpointed_attention_forward_captures_metadata(monkeypatch):

@@ -107,6 +107,38 @@ def _apply_absorbed_v_up_projection(
     return core_attn_out.view(*core_attn_out.shape[:-2], -1)
 
 
+def _apply_chunked_sequence_parallel_output_projection(
+    linear_proj,
+    core_attn_out: torch.Tensor,
+    local_chunk_size: int,
+    tp_group,
+) -> tuple[torch.Tensor, None]:
+    """Apply a row-parallel output projection in bounded sequence chunks.
+
+    Sequence parallelism expects each row-parallel call to contain an equal slice from every
+    tensor-parallel rank. Reassemble each local-token window across those rank slices before the
+    projection so its reduce-scatter preserves the unchunked output order.
+    """
+    tp_size = get_pg_size(tp_group)
+    if core_attn_out.size(0) % tp_size != 0:
+        raise ValueError(
+            "AbsorbedMLA output projection requires the sequence dimension to be divisible by "
+            f"tensor parallel size, got {core_attn_out.size(0)} and {tp_size}."
+        )
+
+    rank_inputs = core_attn_out.chunk(tp_size, dim=0)
+    local_sequence_length = rank_inputs[0].size(0)
+    outputs = []
+    for start in range(0, local_sequence_length, local_chunk_size):
+        end = min(start + local_chunk_size, local_sequence_length)
+        chunk_input = torch.cat([rank_input[start:end] for rank_input in rank_inputs], dim=0)
+        chunk_output, chunk_bias = linear_proj(chunk_input)
+        if chunk_bias is not None:
+            raise ValueError("Chunked AbsorbedMLA output projection does not support bias.")
+        outputs.append(chunk_output)
+    return torch.cat(outputs, dim=0), None
+
+
 @dataclass
 class AbsorbedMLASelfAttentionSubmodules:
     """
@@ -945,11 +977,21 @@ class AbsorbedMLASelfAttention(Attention):
         # =================
         # Output. [sq, b, h]
         # =================
+        def apply_output_projection():
+            if self.config.mla_output_projection_chunk_size is None:
+                return self.linear_proj(core_attn_out)
+            return _apply_chunked_sequence_parallel_output_projection(
+                self.linear_proj,
+                core_attn_out,
+                self.config.mla_output_projection_chunk_size,
+                self.tp_group,
+            )
+
         if self.config.mla_disable_attention_fp8:
             with get_fp8_disabled_context(self.config):
-                output, bias = self.linear_proj(core_attn_out)
+                output, bias = apply_output_projection()
         else:
-            output, bias = self.linear_proj(core_attn_out)
+            output, bias = apply_output_projection()
 
         return output, bias
 
