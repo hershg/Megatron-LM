@@ -3675,6 +3675,10 @@ class MLATransformerConfig(TransformerConfig):
        This is only for the dynamic inference backend and requires that 
        Flash MLA is installed."""
 
+    mla_output_projection_chunk_size: Optional[int] = None
+    """Maximum local sequence length per absorbed-MLA output-projection call. When set, the
+    projection is chunked while preserving sequence-parallel reduce-scatter ownership."""
+
     mla_down_proj_fusion: bool = False
     """Enable fused q/kv down-projection and fused input layernorm when backend supports.
        Otherwise fall back to the unfused MLA.
@@ -3682,6 +3686,11 @@ class MLATransformerConfig(TransformerConfig):
 
     def __post_init__(self):
         super().__post_init__()
+        if (
+            self.mla_output_projection_chunk_size is not None
+            and self.mla_output_projection_chunk_size <= 0
+        ):
+            raise ValueError("mla_output_projection_chunk_size must be positive when set.")
         if self.attention_latent_norm_epsilon is None:
             self.attention_latent_norm_epsilon = self.layernorm_epsilon
 
